@@ -1,0 +1,160 @@
+# FinOps full stack — local Docker / ECS Compose compatible
+#
+# Quick start:
+#   cp .env.docker.example .env.docker
+#   docker compose --env-file .env.docker up --build
+#
+# URLs:
+#   UI  http://localhost:3000
+#   API http://localhost:8100/docs
+#   Dev login admin / admin (AUTH_DEV_BYPASS=true)
+#
+# Optional LLM (Ollama):
+#   docker compose --profile llm up --build
+
+name: finops
+
+# CPU architectures (Compose uses the host arch by default):
+#   ARM        → linux/arm64
+#   AMD        → linux/amd64
+#   x86_64     → linux/amd64  (same Docker platform as AMD)
+# Optional force: export DOCKER_DEFAULT_PLATFORM=linux/amd64|linux/arm64
+# Multi-arch image build: ./scripts/docker-build-multiarch.sh
+# Docs: deploy/multiarch.md
+
+services:
+  db:
+    # Postgres 16 + pgvector — official multi-arch (amd64 + arm64)
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-finops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finops}
+      POSTGRES_DB: ${POSTGRES_DB:-finops}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - finops_pg:/var/lib/postgresql/data
+      - ./deploy/postgres/init-pgvector.sql:/docker-entrypoint-initdb.d/01-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finops} -d ${POSTGRES_DB:-finops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - finops
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - finops_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - finops
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ${FINOPS_API_IMAGE:-finops-api:local}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8100}:8100"
+    environment:
+      APP_NAME: FinOps API
+      ENVIRONMENT: ${ENVIRONMENT:-docker}
+      DEBUG: ${DEBUG:-false}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-long-random}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-finops}:${POSTGRES_PASSWORD:-finops}@db:5432/${POSTGRES_DB:-finops}
+      REDIS_URL: redis://redis:6379/0
+      CACHE_ENABLED: "true"
+      CACHE_BACKEND: ${CACHE_BACKEND:-redis}
+      AUTH_DEV_BYPASS: ${AUTH_DEV_BYPASS:-true}
+      AUTH_DEV_USER: ${AUTH_DEV_USER:-admin}
+      AUTH_DEV_PASSWORD: ${AUTH_DEV_PASSWORD:-admin}
+      AUTH_DEV_ROLES: ${AUTH_DEV_ROLES:-admin,finops}
+      LDAP_ENABLED: ${LDAP_ENABLED:-false}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-tenant-demo}
+      FINOPS_BASE_DOMAIN: ${FINOPS_BASE_DOMAIN:-localhost}
+      FINOPS_APEX_HOSTS: ${FINOPS_APEX_HOSTS:-localhost,127.0.0.1,www.localhost}
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_ENDPOINT: ${LLM_ENDPOINT:-http://ollama:11434}
+      LLM_MODEL: ${LLM_MODEL:-llama3.2:1b}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-90}
+    volumes:
+      # Persist SQLite fallback / local uploads if used
+      - finops_api_data:/app/data
+      # Optional: mount host AWS SSO/CLI config for Discover (local only)
+      - ${AWS_CONFIG_DIR:-${HOME}/.aws}:/app/.aws:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8100/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    networks:
+      - finops
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8100/api/v1}
+    image: ${FINOPS_UI_IMAGE:-finops-frontend:local}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    networks:
+      - finops
+
+  # Optional local LLM — enable with: docker compose --profile llm up
+  ollama:
+    profiles: ["llm"]
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - finops_ollama:/root/.ollama
+    networks:
+      - finops
+
+networks:
+  finops:
+    driver: bridge
+
+volumes:
+  finops_pg:
+  finops_redis:
+  finops_api_data:
+  finops_ollama:

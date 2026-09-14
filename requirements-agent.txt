@@ -1,0 +1,11 @@
+# Optional — Cursor SDK feature builder
+#
+# IMPORTANT: cursor-sdk requires Python 3.10+ (your backend venv may be 3.9).
+# Recommended: use the Node runner instead (no Python version issue):
+#   bash scripts/setup_feature_agent.sh
+#   cd scripts/feature-agent && npm install
+#
+# Or create a separate venv with Python 3.10+:
+#   python3.12 -m venv .venv-agent
+#   .venv-agent/bin/pip install -r requirements-agent.txt
+cursor-sdk>=1.0.24
